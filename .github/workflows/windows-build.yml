@@ -63,3 +63,66 @@ jobs:
           cd "openresty-$(./util/ver)"
           bash ./util/build-win32.sh
           ./nginx.exe -V 2>&1
+
+      - name: Package runnable Windows bundle
+        shell: bash
+        run: |
+          set -e
+
+          cd "openresty-$(./util/ver)"
+
+          mkdir -p dist
+          mkdir -p dist/logs
+
+          INSTALL_ROOT=""
+          for d in /usr/local/openresty /opt/openresty /mingw64/openresty "$PWD"; do
+            if [ -f "$d/nginx.exe" ] || [ -f "$d/nginx" ]; then
+              INSTALL_ROOT="$d"
+              break
+            fi
+          done
+
+          if [ -z "$INSTALL_ROOT" ]; then
+            echo "Could not find installed OpenResty root directory"
+            exit 1
+          fi
+
+          echo "Using install root: $INSTALL_ROOT"
+          cp -a "$INSTALL_ROOT"/. dist/
+
+          # keep logs dir writable
+          mkdir -p dist/logs
+
+          # create a simple start/stop helper so the unpacked package is directly runnable
+          cat > dist/start.bat <<'EOF'
+          @echo off
+          set "ROOT=%~dp0"
+          "%ROOT%nginx.exe" -p "%ROOT%"
+          EOF
+
+          cat > dist/stop.bat <<'EOF'
+          @echo off
+          set "ROOT=%~dp0"
+          "%ROOT%nginx.exe" -s quit -p "%ROOT%"
+          EOF
+
+          # copy required DLLs from the MSYS2 runtime into the bundle
+          for d in /mingw64/bin /ucrt64/bin /usr/bin; do
+            [ -d "$d" ] || continue
+            for dll in $(find "$d" -maxdepth 1 -type f -name '*.dll' 2>/dev/null); do
+              base=$(basename "$dll")
+              if ldd ./nginx.exe 2>/dev/null | grep -q "$base"; then
+                cp -f "$dll" dist/
+              fi
+            done
+          done
+
+          zip -r "openresty-windows-${{ matrix.host_arch }}-run.zip" dist
+          echo "ARTIFACT_PATH=$(pwd)/openresty-windows-${{ matrix.host_arch }}-run.zip" >> "$GITHUB_ENV"
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openresty-windows-${{ matrix.host_arch }}-run
+          path: ${{ env.ARTIFACT_PATH }}
+          if-no-files-found: error
