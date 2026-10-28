@@ -55,31 +55,92 @@ jobs:
             ${{ matrix.toolchain }}
 
       - name: Create source bundle
-        run: bash util/mirror-tarballs
+        run: |
+          set -euo pipefail
+          bash util/mirror-tarballs
 
       - name: Build OpenResty
         run: |
+          set -euo pipefail
+
+          echo "=== MSYS2 environment ==="
           uname -a
-          cd "openresty-$(./util/ver)"
+          echo "MSYSTEM=$MSYSTEM"
+
+          VERSION="$(./util/ver)"
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to determine OpenResty version"
+            exit 1
+          fi
+
+          SRC_DIR="openresty-$VERSION"
+
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "::error::Source directory not found: $SRC_DIR"
+            exit 1
+          fi
+
+          cd "$SRC_DIR"
+
           bash ./util/build-win32.sh
+
+          if [ ! -f nginx.exe ]; then
+            echo "::error::nginx.exe was not generated"
+            exit 1
+          fi
+
+          echo "=== Nginx version ==="
           ./nginx.exe -V 2>&1
 
       - name: Create official-style runnable bundle
         run: |
-          set -e
+          set -euo pipefail
 
-          SRC_DIR="openresty-$(./util/ver)"
-          BUNDLE_NAME="openresty-$(./util/ver)-windows-${{ matrix.host_arch }}"
-          BUNDLE_ROOT="/tmp/${BUNDLE_NAME}"
-          ZIP_PATH="${SRC_DIR}/${BUNDLE_NAME}.zip"
+          # Resolve paths using the current MSYS2 shell.
+          WORKSPACE="$(pwd -P)"
+          VERSION="$(./util/ver)"
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to determine OpenResty version"
+            exit 1
+          fi
+
+          BUNDLE_NAME="openresty-${VERSION}-windows-${{ matrix.host_arch }}"
+          SRC_DIR="$WORKSPACE/openresty-$VERSION"
+          BUNDLE_ROOT="/tmp/$BUNDLE_NAME"
+          ZIP_PATH="$WORKSPACE/$BUNDLE_NAME.zip"
+
+          # Verify the source directory.
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "::error::Build directory not found: $SRC_DIR"
+            exit 1
+          fi
 
           cd "$SRC_DIR"
 
-          # Build bundle outside the source tree to avoid self-copy recursion.
+          # Verify essential build outputs.
+          required_files=(
+            nginx.exe
+            luajit.exe
+            conf
+            html
+          )
+
+          for item in "${required_files[@]}"; do
+            if [ ! -e "$item" ]; then
+              echo "::error::Required build output is missing: $item"
+              exit 1
+            fi
+          done
+
+          # Never create output inside the source tree.
           rm -rf "$BUNDLE_ROOT"
+          rm -f "$ZIP_PATH"
+
           mkdir -p "$BUNDLE_ROOT/logs"
 
-          # Runtime files expected in a normal Windows OpenResty distribution.
+          # Copy runtime files.
           for item in \
             nginx.exe \
             lua \
@@ -105,18 +166,22 @@ jobs:
             fi
           done
 
-          # Include required DLLs next to the executable.
+          # Copy DLLs referenced by nginx.exe.
           for d in /mingw64/bin /ucrt64/bin /usr/bin; do
             [ -d "$d" ] || continue
-            for dll in $(find "$d" -maxdepth 1 -type f -name '*.dll' 2>/dev/null); do
-              base=$(basename "$dll")
+
+            while IFS= read -r -d '' dll; do
+              base="$(basename "$dll")"
+
               if ldd ./nginx.exe 2>/dev/null | grep -q "$base"; then
                 cp -f "$dll" "$BUNDLE_ROOT/"
               fi
-            done
+            done < <(
+              find "$d" -maxdepth 1 -type f -iname '*.dll' -print0
+            )
           done
 
-          # Start/stop helpers for direct execution after unzip.
+          # Helper scripts.
           cat > "$BUNDLE_ROOT/start.bat" <<'EOF'
           @echo off
           set "ROOT=%~dp0"
@@ -129,18 +194,27 @@ jobs:
           "%ROOT%nginx.exe" -s quit -p "%ROOT%"
           EOF
 
-          # Ensure logs dir exists and is writable.
+          # Ensure the logs directory exists.
           mkdir -p "$BUNDLE_ROOT/logs"
 
-          # Package from /tmp so zip is not created inside the bundle.
+          # Create ZIP using an absolute POSIX path.
           cd /tmp
           zip -r "$ZIP_PATH" "$BUNDLE_NAME"
 
-          echo "ARTIFACT_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          # Verify archive integrity.
+          if [ ! -s "$ZIP_PATH" ]; then
+            echo "::error::ZIP archive was not created or is empty"
+            exit 1
+          fi
+
+          unzip -t "$ZIP_PATH"
+
+          echo "=== Archive contents ==="
+          unzip -Z1 "$ZIP_PATH"
 
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
           name: openresty-windows-${{ matrix.host_arch }}-official
-          path: ${{ env.ARTIFACT_PATH }}
+          path: openresty-*-windows-${{ matrix.host_arch }}.zip
           if-no-files-found: error
