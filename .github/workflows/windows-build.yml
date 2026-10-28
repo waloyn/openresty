@@ -64,23 +64,22 @@ jobs:
           bash ./util/build-win32.sh
           ./nginx.exe -V 2>&1
 
-      - name: Package runnable Windows bundle
-        shell: bash
+      - name: Create official-style runnable bundle
         run: |
           set -e
 
           SRC_DIR="openresty-$(./util/ver)"
-          DIST_NAME="openresty-windows-${{ matrix.host_arch }}-run"
-          DIST_ROOT="/tmp/${DIST_NAME}"
+          BUNDLE_NAME="openresty-$(./util/ver)-windows-${{ matrix.host_arch }}"
+          BUNDLE_ROOT="/tmp/${BUNDLE_NAME}"
+          ZIP_PATH="${SRC_DIR}/${BUNDLE_NAME}.zip"
 
           cd "$SRC_DIR"
 
-          # Always build bundle outside the source tree. Never copy the bundle into itself.
-          rm -rf "$DIST_ROOT"
-          mkdir -p "$DIST_ROOT/logs"
+          # Build bundle outside the source tree to avoid self-copy recursion.
+          rm -rf "$BUNDLE_ROOT"
+          mkdir -p "$BUNDLE_ROOT/logs"
 
-          # Copy only the runtime files that are required to run the binary.
-          # This avoids recursive copy issues from copying the whole source tree into dist.
+          # Runtime files expected in a normal Windows OpenResty distribution.
           for item in \
             nginx.exe \
             lua \
@@ -102,43 +101,46 @@ jobs:
             COPYRIGHT
           do
             if [ -e "$item" ]; then
-              cp -a "$item" "$DIST_ROOT/"
+              cp -a "$item" "$BUNDLE_ROOT/"
             fi
           done
 
-          # Ensure runtime DLLs are available next to nginx.exe.
+          # Include required DLLs next to the executable.
           for d in /mingw64/bin /ucrt64/bin /usr/bin; do
             [ -d "$d" ] || continue
             for dll in $(find "$d" -maxdepth 1 -type f -name '*.dll' 2>/dev/null); do
               base=$(basename "$dll")
               if ldd ./nginx.exe 2>/dev/null | grep -q "$base"; then
-                cp -f "$dll" "$DIST_ROOT/"
+                cp -f "$dll" "$BUNDLE_ROOT/"
               fi
             done
           done
 
-          # Create startup helpers for direct execution after unzip.
-          cat > "$DIST_ROOT/start.bat" <<'EOF'
+          # Start/stop helpers for direct execution after unzip.
+          cat > "$BUNDLE_ROOT/start.bat" <<'EOF'
           @echo off
           set "ROOT=%~dp0"
           "%ROOT%nginx.exe" -p "%ROOT%"
           EOF
 
-          cat > "$DIST_ROOT/stop.bat" <<'EOF'
+          cat > "$BUNDLE_ROOT/stop.bat" <<'EOF'
           @echo off
           set "ROOT=%~dp0"
           "%ROOT%nginx.exe" -s quit -p "%ROOT%"
           EOF
 
-          # Zip from the parent directory so the zip itself is not inside the bundle.
-          cd /tmp
-          zip -r "${SRC_DIR}/${DIST_NAME}.zip" "${DIST_NAME}"
+          # Ensure logs dir exists and is writable.
+          mkdir -p "$BUNDLE_ROOT/logs"
 
-          echo "ARTIFACT_PATH=${SRC_DIR}/${DIST_NAME}.zip" >> "$GITHUB_ENV"
+          # Package from /tmp so zip is not created inside the bundle.
+          cd /tmp
+          zip -r "$ZIP_PATH" "$BUNDLE_NAME"
+
+          echo "ARTIFACT_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
 
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openresty-windows-${{ matrix.host_arch }}-run
+          name: openresty-windows-${{ matrix.host_arch }}-official
           path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: error
