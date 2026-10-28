@@ -69,56 +69,72 @@ jobs:
         run: |
           set -e
 
-          cd "openresty-$(./util/ver)"
+          SRC_DIR="openresty-$(./util/ver)"
+          DIST_NAME="openresty-windows-${{ matrix.host_arch }}-run"
+          DIST_ROOT="/tmp/${DIST_NAME}"
 
-          mkdir -p dist
-          mkdir -p dist/logs
+          cd "$SRC_DIR"
 
-          INSTALL_ROOT=""
-          for d in /usr/local/openresty /opt/openresty /mingw64/openresty "$PWD"; do
-            if [ -f "$d/nginx.exe" ] || [ -f "$d/nginx" ]; then
-              INSTALL_ROOT="$d"
-              break
+          # Always build bundle outside the source tree. Never copy the bundle into itself.
+          rm -rf "$DIST_ROOT"
+          mkdir -p "$DIST_ROOT/logs"
+
+          # Copy only the runtime files that are required to run the binary.
+          # This avoids recursive copy issues from copying the whole source tree into dist.
+          for item in \
+            nginx.exe \
+            lua \
+            luajit.exe \
+            resty \
+            resty.bat \
+            restydoc \
+            restydoc-index \
+            restydoc-index.bat \
+            restydoc.bat \
+            conf \
+            html \
+            logs \
+            pod \
+            include \
+            lib \
+            lualib \
+            README.txt \
+            COPYRIGHT
+          do
+            if [ -e "$item" ]; then
+              cp -a "$item" "$DIST_ROOT/"
             fi
           done
 
-          if [ -z "$INSTALL_ROOT" ]; then
-            echo "Could not find installed OpenResty root directory"
-            exit 1
-          fi
-
-          echo "Using install root: $INSTALL_ROOT"
-          cp -a "$INSTALL_ROOT"/. dist/
-
-          # keep logs dir writable
-          mkdir -p dist/logs
-
-          # create a simple start/stop helper so the unpacked package is directly runnable
-          cat > dist/start.bat <<'EOF'
-          @echo off
-          set "ROOT=%~dp0"
-          "%ROOT%nginx.exe" -p "%ROOT%"
-          EOF
-
-          cat > dist/stop.bat <<'EOF'
-          @echo off
-          set "ROOT=%~dp0"
-          "%ROOT%nginx.exe" -s quit -p "%ROOT%"
-          EOF
-
-          # copy required DLLs from the MSYS2 runtime into the bundle
+          # Ensure runtime DLLs are available next to nginx.exe.
           for d in /mingw64/bin /ucrt64/bin /usr/bin; do
             [ -d "$d" ] || continue
             for dll in $(find "$d" -maxdepth 1 -type f -name '*.dll' 2>/dev/null); do
               base=$(basename "$dll")
               if ldd ./nginx.exe 2>/dev/null | grep -q "$base"; then
-                cp -f "$dll" dist/
+                cp -f "$dll" "$DIST_ROOT/"
               fi
             done
           done
 
-          zip -r "openresty-windows-${{ matrix.host_arch }}-run.zip" dist
-          echo "ARTIFACT_PATH=$(pwd)/openresty-windows-${{ matrix.host_arch }}-run.zip" >> "$GITHUB_ENV"
+          # Create startup helpers for direct execution after unzip.
+          cat > "$DIST_ROOT/start.bat" <<'EOF'
+          @echo off
+          set "ROOT=%~dp0"
+          "%ROOT%nginx.exe" -p "%ROOT%"
+          EOF
+
+          cat > "$DIST_ROOT/stop.bat" <<'EOF'
+          @echo off
+          set "ROOT=%~dp0"
+          "%ROOT%nginx.exe" -s quit -p "%ROOT%"
+          EOF
+
+          # Zip from the parent directory so the zip itself is not inside the bundle.
+          cd /tmp
+          zip -r "${SRC_DIR}/${DIST_NAME}.zip" "${DIST_NAME}"
+
+          echo "ARTIFACT_PATH=${SRC_DIR}/${DIST_NAME}.zip" >> "$GITHUB_ENV"
 
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
